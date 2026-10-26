@@ -11,7 +11,7 @@
 set -Eeuo pipefail
 
 # ---------- Настройки автора (можно менять) ----------------------------------
-AUTHOR_NAME="MAGIC"
+AUTHOR_NAME="MAGIC TOOLS"
 AUTHOR_URL="https://mglnk.store"
 MM_DOCKER_REPO="https://github.com/mattermost/docker"
 # Проверенная версия mattermost/docker (Mattermost 11.7.0). Чтобы обновить —
@@ -48,6 +48,15 @@ show_logo() {
    ██║╚██╔╝██║██╔══██║██║   ██║██║██║
    ██║ ╚═╝ ██║██║  ██║╚██████╔╝██║╚██████╗
    ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝ ╚═════╝
+EOF
+  echo -n "${C_RESET}${C_MAGENTA}${C_BOLD}"
+  cat <<'EOF'
+   ████████╗ ██████╗  ██████╗ ██╗     ███████╗
+   ╚══██╔══╝██╔═══██╗██╔═══██╗██║     ██╔════╝
+      ██║   ██║   ██║██║   ██║██║     ███████╗
+      ██║   ██║   ██║██║   ██║██║     ╚════██║
+      ██║   ╚██████╔╝╚██████╔╝███████╗███████║
+      ╚═╝    ╚═════╝  ╚═════╝ ╚══════╝╚══════╝
 EOF
   echo "${C_RESET}"
   echo "   ${C_BOLD}Mattermost Installer${C_RESET}  ${C_DIM}by ${AUTHOR_NAME} · ${AUTHOR_URL}${C_RESET}"
