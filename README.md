@@ -10,18 +10,40 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/zavitayte/mattermost/main/install.sh)
 ```
 
-Скрипт спросит домен, e-mail, часовой пояс и дополнительные опции, покажет сводку и всё установит.
+Скрипт спросит домен, e-mail, часовой пояс, редакцию, язык, почту и дополнительные опции, покажет сводку и всё установит.
+Где есть значение по умолчанию (оно в `[скобках]`), достаточно нажать Enter. На вопросы да/нет отвечайте `y` или `n`.
 
 **Перед запуском** создайте A-запись домена на IP сервера.
+
+### Часовой пояс
+
+Пишется как `Регион/Город` латиницей, регистр важен: `Europe/Moscow`, `Asia/Yekaterinburg`, `Asia/Novosibirsk`, `UTC`.
+Полный список: `timedatectl list-timezones`.
+
+### Какую редакцию выбрать
+
+Обе бесплатные:
+
+| | Team | Enterprise (без лицензии) |
+|---|---|---|
+| Код | открытый | закрытый |
+| История сообщений | без ограничений | видны последние 10 000 |
+| Пользователи | до 250 | — |
+| Boards, Playbooks, SSO | нет | да, с лимитами |
+
+Для бесплатного использования рекомендуется **Team** (выбрана по умолчанию).
 
 ## Что делает скрипт
 
 - обновляет систему и при желании создаёт swap;
 - настраивает файрвол UFW (SSH, 80, 443, 8443);
 - ставит Docker;
-- разворачивает официальный [mattermost/docker](https://github.com/mattermost/docker);
+- разворачивает официальный [mattermost/docker](https://github.com/mattermost/docker) (закреплённая проверенная версия, Mattermost 11.7.0);
 - выпускает SSL-сертификат и настраивает его автопродление;
+- по желанию делает русский язык интерфейсом по умолчанию и настраивает почту (SMTP);
 - по желанию включает ежедневный бэкап базы и файлов.
+
+Язык и почта записываются в `config.json`, поэтому их можно поменять потом в Системной консоли.
 
 Повторный запуск безопасен: существующие данные, пароль базы и сертификат сохраняются.
 
@@ -29,16 +51,16 @@ bash <(curl -fsSL https://raw.githubusercontent.com/zavitayte/mattermost/main/in
 
 ```bash
 cd /opt/mattermost
-docker compose -f docker-compose.yml -f docker-compose.nginx.yml logs -f     # логи
-docker compose -f docker-compose.yml -f docker-compose.nginx.yml restart     # перезапуск
-mattermost-backup                                                            # бэкап вручную
+docker compose logs -f     # логи
+docker compose restart     # перезапуск
+mattermost-backup          # бэкап вручную
 ```
 
 ### Обновление Mattermost
 
-Поменяйте `MATTERMOST_IMAGE_TAG` в `/opt/mattermost/.env` и выполните:
+Сделайте бэкап, поменяйте `MATTERMOST_IMAGE_TAG` в `/opt/mattermost/.env` и выполните:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.nginx.yml pull
-docker compose -f docker-compose.yml -f docker-compose.nginx.yml up -d
+docker compose pull
+docker compose up -d
 ```

@@ -14,6 +14,9 @@ set -Eeuo pipefail
 AUTHOR_NAME="MAGIC"
 AUTHOR_URL="https://mglnk.store"
 MM_DOCKER_REPO="https://github.com/mattermost/docker"
+# Проверенная версия mattermost/docker (Mattermost 11.7.0). Чтобы обновить —
+# поменяйте хеш на свежий коммит и проверьте установку на тестовом сервере.
+MM_DOCKER_COMMIT="497414659ee7127677d2b91b44bb4f3ea9d14695"
 
 # ---------- Цвета и вывод ------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -56,7 +59,7 @@ EOF
 ask() { # ask VAR "Вопрос" "значение по умолчанию"
   local __var=$1 __prompt=$2 __def=${3:-} __ans
   if [[ -n $__def ]]; then
-    read -r -p "${C_CYAN}?${C_RESET} ${__prompt} ${C_DIM}[${__def}]${C_RESET}: " __ans </dev/tty
+    read -r -p "${C_CYAN}?${C_RESET} ${__prompt} ${C_DIM}[${__def}] (Enter — оставить по умолчанию)${C_RESET}: " __ans </dev/tty
   else
     read -r -p "${C_CYAN}?${C_RESET} ${__prompt}: " __ans </dev/tty
   fi
@@ -64,11 +67,17 @@ ask() { # ask VAR "Вопрос" "значение по умолчанию"
 }
 
 ask_yn() { # ask_yn "Вопрос" y|n   → код 0 = да
-  local __def=$2 __ans __hint
-  [[ $__def == y ]] && __hint="Д/н" || __hint="д/Н"
-  read -r -p "${C_CYAN}?${C_RESET} $1 ${C_DIM}[${__hint}]${C_RESET}: " __ans </dev/tty
-  __ans=${__ans:-$__def}
-  [[ ${__ans,,} =~ ^(y|yes|д|да)$ ]]
+  local __def=$2 __ans __hint __enter
+  if [[ $__def == y ]]; then __hint="Y/n"; __enter="да"; else __hint="y/N"; __enter="нет"; fi
+  while true; do
+    read -r -p "${C_CYAN}?${C_RESET} $1 ${C_DIM}[${__hint}] (Enter — ${__enter})${C_RESET}: " __ans </dev/tty
+    __ans=${__ans:-$__def}
+    case ${__ans,,} in
+      y|yes|д|да)  return 0 ;;
+      n|no|нет)    return 1 ;;
+      *) warn "Введите y (да) или n (нет). Проверьте раскладку клавиатуры." ;;
+    esac
+  done
 }
 
 ask_secret() { # ask_secret VAR "Вопрос"
@@ -116,7 +125,8 @@ main() {
 
   # ---------- Вопросы ----------
   echo
-  echo "${C_BOLD}Ответьте на несколько вопросов (Enter = значение по умолчанию):${C_RESET}"
+  echo "${C_BOLD}Ответьте на несколько вопросов.${C_RESET}"
+  echo "${C_DIM}Значение по умолчанию указано в [скобках] — чтобы его оставить, просто нажмите Enter.${C_RESET}"
   echo
 
   local DOMAIN EMAIL TZ_NAME INSTALL_DIR
@@ -133,10 +143,64 @@ main() {
     warn "Некорректный e-mail."
   done
 
-  ask TZ_NAME "Часовой пояс сервера" "Europe/Moscow"
-  [[ -f /usr/share/zoneinfo/$TZ_NAME ]] || { warn "Пояс не найден, ставлю UTC."; TZ_NAME=UTC; }
+  echo "${C_DIM}  Часовой пояс пишется как Регион/Город латиницей, например:"
+  echo "  Europe/Moscow, Europe/Samara, Asia/Yekaterinburg, Asia/Novosibirsk, Asia/Vladivostok, UTC${C_RESET}"
+  while true; do
+    ask TZ_NAME "Часовой пояс сервера" "Europe/Moscow"
+    [[ $TZ_NAME =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ && -f /usr/share/zoneinfo/$TZ_NAME ]] && break
+    warn "Пояс «${TZ_NAME}» не найден. Регистр важен: Europe/Moscow, а не europe/moscow."
+    warn "Полный список: timedatectl list-timezones"
+  done
 
   ask INSTALL_DIR "Папка установки" "/opt/mattermost"
+
+  # Редакция Mattermost. При повторном запуске по умолчанию — текущая.
+  local MM_IMAGE cur_image
+  cur_image=$(grep -E '^MATTERMOST_IMAGE=' "$INSTALL_DIR/.env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)
+  echo
+  echo "${C_BOLD}Редакция Mattermost${C_RESET} (обе бесплатные):"
+  echo "  1) Team       — открытый код, без лимита на историю сообщений, до 250 пользователей"
+  echo "  2) Enterprise — больше функций (Boards, Playbooks, SSO), но видны только"
+  echo "                  последние 10 000 сообщений; лимит снимается платной лицензией"
+  local ed_def=1
+  [[ $cur_image == mattermost-enterprise-edition ]] && ed_def=2
+  while true; do
+    local ed
+    ask ed "Выберите 1 или 2" "$ed_def"
+    case $ed in
+      1) MM_IMAGE=mattermost-team-edition; break ;;
+      2) MM_IMAGE=mattermost-enterprise-edition; break ;;
+      *) warn "Введите 1 или 2." ;;
+    esac
+  done
+  echo
+
+  local SET_RU=n
+  ask_yn "Сделать русский языком интерфейса по умолчанию?" y && SET_RU=y
+
+  # Почта: нужна для приглашений, сброса пароля и уведомлений.
+  local DO_SMTP=n SMTP_HOST= SMTP_PORT= SMTP_USER= SMTP_PASS= SMTP_FROM=
+  echo "${C_DIM}  Почта нужна для приглашений, сброса пароля и уведомлений. Можно настроить позже"
+  echo "  в Системной консоли → Окружение → SMTP.${C_RESET}"
+  if ask_yn "Настроить отправку почты (SMTP) сейчас?" n; then
+    DO_SMTP=y
+    while true; do
+      ask SMTP_HOST "SMTP-сервер (например smtp.site.com)"
+      [[ $SMTP_HOST =~ ^[A-Za-z0-9.-]+$ ]] && break
+      warn "Укажите адрес сервера."
+    done
+    while true; do
+      ask SMTP_PORT "Порт (465 — SSL/TLS, 587 — STARTTLS)" "465"
+      [[ $SMTP_PORT =~ ^[0-9]+$ ]] && break
+      warn "Порт — это число."
+    done
+    while true; do
+      ask SMTP_USER "Логин (обычно это адрес почты, например mail@site.com)"
+      [[ -n $SMTP_USER ]] && break
+    done
+    ask_secret SMTP_PASS "Пароль (у многих почтовых сервисов нужен «пароль приложения»; ввод скрыт)"
+    ask SMTP_FROM "Адрес отправителя" "$SMTP_USER"
+  fi
 
   local DO_UPGRADE=n DO_UFW=n DO_SWAP=n DO_BACKUP=n BACKUP_KEEP=7
   ask_yn "Обновить пакеты системы (apt upgrade)?" y && DO_UPGRADE=y
@@ -147,7 +211,7 @@ main() {
   if ask_yn "Включить ежедневный бэкап (база + файлы)?" y; then
     DO_BACKUP=y
     ask BACKUP_KEEP "Сколько дней хранить бэкапы" "7"
-    [[ $BACKUP_KEEP =~ ^[0-9]+$ ]] || BACKUP_KEEP=7
+    [[ $BACKUP_KEEP =~ ^[0-9]+$ ]] && (( BACKUP_KEEP >= 1 )) || BACKUP_KEEP=7
   fi
 
   # ---------- Проверка DNS ----------
@@ -166,6 +230,15 @@ main() {
     ok "${DOMAIN} → ${domain_ip}"
   fi
 
+  if [[ $DO_SMTP == y ]]; then
+    if timeout 6 bash -c "exec 3<>/dev/tcp/${SMTP_HOST}/${SMTP_PORT}" 2>/dev/null; then
+      ok "SMTP ${SMTP_HOST}:${SMTP_PORT} доступен"
+    else
+      warn "Не удалось подключиться к ${SMTP_HOST}:${SMTP_PORT}. Возможно, хостинг блокирует"
+      warn "исходящую почту — уточните в поддержке. Настройки всё равно будут сохранены."
+    fi
+  fi
+
   if ss -ltnH '( sport = :80 or sport = :443 )' 2>/dev/null | grep -q . \
      && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q nginx; then
     warn "Порты 80/443 уже заняты другим процессом:"
@@ -180,6 +253,9 @@ main() {
   echo "  E-mail:         ${EMAIL}"
   echo "  Часовой пояс:   ${TZ_NAME}"
   echo "  Папка:          ${INSTALL_DIR}"
+  echo "  Редакция:       $([[ $MM_IMAGE == mattermost-team-edition ]] && echo Team || echo Enterprise)"
+  echo "  Русский язык:   ${SET_RU}"
+  echo "  Почта (SMTP):   $([[ $DO_SMTP == y ]] && echo "${SMTP_HOST}:${SMTP_PORT}, от ${SMTP_FROM}" || echo n)"
   echo "  apt upgrade:    ${DO_UPGRADE}"
   echo "  Файрвол UFW:    ${DO_UFW}"
   echo "  Swap 2 ГБ:      ${DO_SWAP}"
@@ -197,7 +273,8 @@ main() {
   if [[ $DO_UPGRADE == y ]]; then
     apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y
   fi
-  apt-get install -y git curl ca-certificates openssl ufw cron
+  apt-get install -y git curl ca-certificates openssl cron jq
+  [[ $DO_UFW == y ]] && apt-get install -y ufw
   ok "Пакеты установлены"
 
   if [[ $DO_SWAP == y ]]; then
@@ -241,8 +318,13 @@ main() {
   if [[ -d $INSTALL_DIR/.git ]]; then
     warn "Папка ${INSTALL_DIR} уже есть, использую её (повторный запуск)."
   else
-    mkdir -p "$(dirname "$INSTALL_DIR")"
-    git clone --depth 1 "$MM_DOCKER_REPO" "$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
+    git -C "$INSTALL_DIR" init -q
+    git -C "$INSTALL_DIR" remote add origin "$MM_DOCKER_REPO"
+    git -C "$INSTALL_DIR" fetch -q --depth 1 origin "$MM_DOCKER_COMMIT" \
+      || { rm -rf "$INSTALL_DIR/.git"; die "Не удалось скачать mattermost/docker. Проверьте интернет и запустите снова."; }
+    git -C "$INSTALL_DIR" checkout -q FETCH_HEAD
+    ok "Загружен mattermost/docker (версия ${MM_DOCKER_COMMIT:0:7})"
   fi
   cd "$INSTALL_DIR"
 
@@ -261,6 +343,9 @@ main() {
   set_env POSTGRES_PASSWORD "$PG_PASS"
   set_env CERT_PATH "./certs/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
   set_env KEY_PATH  "./certs/etc/letsencrypt/live/${DOMAIN}/privkey.pem"
+  set_env MATTERMOST_IMAGE "$MM_IMAGE"
+  # Чтобы в папке установки работали короткие команды: docker compose logs -f и т.п.
+  set_env COMPOSE_FILE "docker-compose.yml:docker-compose.nginx.yml"
   chmod 600 .env
   ok ".env настроен"
 
@@ -326,7 +411,46 @@ EOF
   if [[ $ready == y ]]; then
     ok "Mattermost отвечает"
   else
-    warn "Mattermost пока не ответил. Логи: cd ${INSTALL_DIR} && ${COMPOSE[*]} logs -f"
+    warn "Mattermost пока не ответил. Логи: cd ${INSTALL_DIR} && docker compose logs -f"
+  fi
+
+  # ---------- Язык и почта (пишем в config.json, чтобы их можно было менять в консоли) ----------
+  if [[ $SET_RU == y || $DO_SMTP == y ]]; then
+    step "Язык и почта"
+    local CFG=volumes/app/mattermost/config/config.json
+    if [[ -f $CFG ]]; then
+      local smtp_sec=""
+      [[ $SMTP_PORT == 465 ]] && smtp_sec=TLS
+      [[ $SMTP_PORT == 587 ]] && smtp_sec=STARTTLS
+      "${COMPOSE[@]}" stop mattermost >/dev/null
+      MM_SMTP_PASS="$SMTP_PASS" \
+      jq --arg ru "$SET_RU" --arg smtp "$DO_SMTP" \
+         --arg host "$SMTP_HOST" --arg port "$SMTP_PORT" --arg user "$SMTP_USER" \
+         --arg from "$SMTP_FROM" --arg sec "$smtp_sec" '
+        (if $ru == "y" then
+           .LocalizationSettings.DefaultServerLocale = "ru"
+           | .LocalizationSettings.DefaultClientLocale = "ru"
+         else . end)
+        | (if $smtp == "y" then
+           .EmailSettings.SendEmailNotifications = true
+           | .EmailSettings.EnableSMTPAuth = true
+           | .EmailSettings.SMTPServer = $host
+           | .EmailSettings.SMTPPort = $port
+           | .EmailSettings.SMTPUsername = $user
+           | .EmailSettings.SMTPPassword = env.MM_SMTP_PASS
+           | .EmailSettings.ConnectionSecurity = $sec
+           | .EmailSettings.FeedbackEmail = $from
+           | .EmailSettings.ReplyToAddress = $from
+         else . end)' "$CFG" > "$CFG.tmp"
+      cat "$CFG.tmp" > "$CFG" && rm -f "$CFG.tmp"   # cat сохраняет владельца и права файла
+      "${COMPOSE[@]}" start mattermost >/dev/null
+      if [[ $SET_RU == y ]]; then ok "Русский язык установлен по умолчанию"; fi
+      if [[ $DO_SMTP == y ]]; then
+        ok "Почта настроена. Проверить: Системная консоль → SMTP → «Проверить соединение»"
+      fi
+    else
+      warn "config.json ещё не создан — задайте язык и почту в Системной консоли после входа."
+    fi
   fi
 
   # ---------- 7. Бэкап ----------
@@ -345,7 +469,7 @@ mkdir -p "\$DIR"
 docker compose -f docker-compose.yml -f docker-compose.nginx.yml exec -T postgres \\
   pg_dump -U "${PG_USER}" "${PG_DB}" | gzip > "\$DIR/db_\$TS.sql.gz"
 tar -czf "\$DIR/files_\$TS.tar.gz" -C volumes/app/mattermost config data
-find "\$DIR" -type f -name '*.gz' -mtime +${BACKUP_KEEP} -delete
+find "\$DIR" -type f -name '*.gz' -mtime +$((BACKUP_KEEP - 1)) -delete
 echo "\$(date '+%F %T') бэкап готов: \$TS"
 EOF
     chmod +x /usr/local/bin/mattermost-backup
@@ -365,10 +489,10 @@ EOF
   echo "  Первый зарегистрированный пользователь станет администратором."
   echo
   echo "  ${C_BOLD}Полезные команды${C_RESET} (из папки ${INSTALL_DIR}):"
-  echo "    Логи:        ${COMPOSE[*]} logs -f"
-  echo "    Перезапуск:  ${COMPOSE[*]} restart"
-  echo "    Остановка:   ${COMPOSE[*]} down"
-  echo "    Бэкап сейчас: mattermost-backup"
+  echo "    Логи:         docker compose logs -f"
+  echo "    Перезапуск:   docker compose restart"
+  echo "    Остановка:    docker compose down"
+  [[ $DO_BACKUP == y ]] && echo "    Бэкап сейчас: mattermost-backup"
   echo
   echo "  Пароль базы данных сохранён в ${INSTALL_DIR}/.env"
   echo
